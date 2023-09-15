@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # ------------------------------------------------------------------------------
@@ -29,9 +29,9 @@ import sys
 try:
     from enum import Enum
     import argparse
-    import json
+    import json # is this needed?
     import requests
-    import urllib3
+    import urllib3 # is this needed?
 
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
@@ -41,6 +41,12 @@ except ImportError as e:
     print("Missing python module: {}".format(e.message))
     sys.exit(255)
 
+MODES = {}
+
+def checkmode(f):
+    MODES[(f.__name__.replace('check', '').lower())] = f.__name__
+
+    return f
 
 class NagiosState(Enum):
     OK = 0
@@ -54,16 +60,24 @@ class CheckOPNsense:
     API_URL = 'https://{}:{}/api/{}'
 
     options = {}
-    perfdata = []
+    perfdata = {}
     checkResult = -1
     checkMessage = ""
+    checkLongOutput = []
 
     def checkOutput(self):
         message = self.checkMessage
+
+        if len(self.checkLongOutput):
+            message += "\n" + "\n".join(self.checkLongOutput)
+
         if self.perfdata:
-            message += self.getPerfdata()
+            message += '|' + self.getPerfdata()
 
         self.output(self.checkResult, message)
+
+    def getPerfdata(self):
+        return ' '.join(['\'{0}\'={1}'.format(key, value) for (key, value) in self.perfdata.items()])
 
     def output(self, returnCode, message):
         prefix = returnCode.name
@@ -83,6 +97,7 @@ class CheckOPNsense:
                 response = requests.post(
                     url,
                     verify=not self.options.api_insecure,
+                    #verify=ssl.CERT_NONE,
                     auth=(self.options.api_key, self.options.api_secret),
                     data=kwargs.get('data', None),
                     timeout=5
@@ -92,6 +107,7 @@ class CheckOPNsense:
                     url,
                     auth=(self.options.api_key, self.options.api_secret),
                     verify=not self.options.api_insecure,
+                    #verify=CERT_NONE,
                     params=kwargs.get('params', None)
                 )
             else:
@@ -120,9 +136,10 @@ class CheckOPNsense:
     def check(self):
         self.checkResult = NagiosState.OK
 
-        if self.options.mode == 'updates':
-            self.checkUpdates()
-        else:
+        try:
+            f = getattr(self, MODES[self.options.mode])
+            f()
+        except (KeyError, AttributeError):
             message = "Check mode '{}' not known".format(self.options.mode)
             self.output(NagiosState.UNKNOWN, message)
 
@@ -145,7 +162,7 @@ class CheckOPNsense:
         check_opts = p.add_argument_group('Check Options')
 
         check_opts.add_argument("-m", "--mode",
-                                choices=('updates',),
+                                choices=MODES.keys(),
                                 required=True,
                                 help="Mode to use.")
         check_opts.add_argument('-w', '--warning', dest='treshold_warning', type=float,
@@ -157,6 +174,7 @@ class CheckOPNsense:
 
         self.options = options
 
+    @checkmode
     def checkUpdates(self):
         url = self.getURL('core/firmware/status')
         data = self.request(url)
@@ -173,10 +191,51 @@ class CheckOPNsense:
         else:
             self.checkMessage = "System up to date"
 
+        self.checkMessage += ' (version={}/{})'.format(data['product_id'], data['product_version'])
+
+        self.checkLongOutput.append(
+            '* Last update check: {}'.format(data['last_check'])
+        )
+
+        self.checkLongOutput.append(
+            '* OS version: {}'.format(data['os_version'])
+        )
+
+    @checkmode
+    def checkRoutes(self):
+        url = self.getURL('routes/gateway/status')
+        data = self.request(url)
+
+        if data['status'] == 'ok':
+            count = 0
+            count_max = len(data['items'])
+            for item in data['items']:
+                self.checkLongOutput.append('* {name} ({address}) **{status_translated}** (rtt={delay}, loss={loss})'.format(**item))
+                if item['status_translated'] == 'Online':
+                    count += 1
+
+            self.checkMessage = 'Gateways online: {}/{}'.format(count, count_max)
+
+            self.checkResult = NagiosState.UNKNOWN
+
+            if count == 0 or count != count_max:
+                self.checkResult = NagiosState.CRITICAL
+            elif count == count_max:
+                self.checkResult = NagiosState.OK
+
+    @checkmode
+    def checkIpsec(self):
+        url = self.getURL('ipsec/service/status')
+        data = self.request(url)
+
+        if data['status'] == 'running':
+            self.checkMessage = 'IPsec: {status}'.format(**data)
+            self.checkResult = NagiosState.OK
+
+
     def __init__(self):
         self.parseOptions()
 
-
-opnsense = CheckOPNsense()
-opnsense.check()
-
+if __name__ == '__main__':
+    opnsense = CheckOPNsense()
+    opnsense.check()
