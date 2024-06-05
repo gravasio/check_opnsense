@@ -3,9 +3,12 @@
 
 # ------------------------------------------------------------------------------
 # check_opnsense.py - A check plugin for monitoring OPNsense firewalls.
-# Copyright (C) 2018  Nicolai Buchwitz <nb@tipi-net.de>
+# Credits:
+#   - Nicolai Buchwitz <nb@tipi-net.de>
+#   - Oliver Völker <oliver@voelker.me>
+#   - Giuseppe Ravasio <giuseppe@ravasio.xyz>
 #
-# Version: 0.1.0
+# Version: 1.0.0
 #
 # ------------------------------------------------------------------------------
 # This program is free software; you can redistribute it and/or
@@ -29,11 +32,11 @@ import sys
 try:
     from enum import Enum
     import argparse
-    import json # is this needed?
     import requests
-    import urllib3 # is this needed?
-
+    import time
+    from dateutil import parser
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
+    from datetime import datetime, timedelta
 
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -45,7 +48,6 @@ MODES = {}
 
 def checkmode(f):
     MODES[(f.__name__.replace('check', '').lower())] = f.__name__
-
     return f
 
 class NagiosState(Enum):
@@ -56,7 +58,7 @@ class NagiosState(Enum):
 
 
 class CheckOPNsense:
-    VERSION = '0.1.0'
+    VERSION = '1.0.0'
     API_URL = 'https://{}:{}/api/{}'
 
     options = {}
@@ -97,7 +99,6 @@ class CheckOPNsense:
                 response = requests.post(
                     url,
                     verify=not self.options.api_insecure,
-                    #verify=ssl.CERT_NONE,
                     auth=(self.options.api_key, self.options.api_secret),
                     data=kwargs.get('data', None),
                     timeout=5
@@ -107,7 +108,6 @@ class CheckOPNsense:
                     url,
                     auth=(self.options.api_key, self.options.api_secret),
                     verify=not self.options.api_insecure,
-                    #verify=CERT_NONE,
                     params=kwargs.get('params', None)
                 )
             else:
@@ -125,7 +125,7 @@ class CheckOPNsense:
             message = "Could not fetch data from API: "
 
             if response.status_code == 401:
-                message += "Could not connection to OPNsense: invalid username or password"
+                message += "Invalid username or password"
             elif response.status_code == 403:
                 message += "Access denied. Please check if API user has sufficient permissions."
             else:
@@ -151,7 +151,7 @@ class CheckOPNsense:
         api_opts = p.add_argument_group('API Options')
 
         api_opts.add_argument("-H", "--hostname", required=True, help="OPNsense hostname or ip address")
-        api_opts.add_argument("-p", "--port", required=False, dest='port', help="OPNsense https-api port", default=80)
+        api_opts.add_argument("-p", "--port", required=False, dest='port', help="OPNsense https-api port", default=443)
         api_opts.add_argument("--api-key", dest='api_key', required=True,
                               help="API key (See OPNsense user manager)")
         api_opts.add_argument("--api-secret", dest='api_secret', required=True,
@@ -174,10 +174,22 @@ class CheckOPNsense:
 
         self.options = options
 
+# Checks if updates are available
     @checkmode
     def checkUpdates(self):
         url = self.getURL('core/firmware/status')
         data = self.request(url)
+
+        # If last update check is older than one day force a refresh
+        last_check_date = parser.parse(data['last_check'])
+        if datetime.now(last_check_date.tzinfo) - last_check_date > timedelta(minutes=1): #days
+            check_ulr = self.getURL('core/firmware/check')
+            check_data = self.request(check_ulr, method='post')
+            if check_data['status'] == 'ok':
+                time.sleep(1)
+            # Reload up to date JSON
+            url = self.getURL('core/firmware/status')
+            data = self.request(url)
 
         if data['status'] == 'ok' and data['status_upgrade_action'] == 'all':
             count = data['updates']
@@ -201,6 +213,7 @@ class CheckOPNsense:
             '* OS version: {}'.format(data['os_version'])
         )
 
+# Checks gateway status
     @checkmode
     def checkRoutes(self):
         url = self.getURL('routes/gateway/status')
@@ -223,6 +236,7 @@ class CheckOPNsense:
             elif count == count_max:
                 self.checkResult = NagiosState.OK
 
+# Checks ipses service status
     @checkmode
     def checkIpsec(self):
         url = self.getURL('ipsec/service/status')
