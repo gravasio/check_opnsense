@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
 # ------------------------------------------------------------------------------
@@ -8,7 +8,7 @@
 #   - Oliver Völker <oliver@voelker.me>
 #   - Giuseppe Ravasio <giuseppe@ravasio.xyz>
 #
-# Version: 1.0.0
+# Version: 1.0.1
 #
 # ------------------------------------------------------------------------------
 # This program is free software; you can redistribute it and/or
@@ -184,9 +184,11 @@ class CheckOPNsense:
     def checkUpdates(self):
         url = self.getURL('core/firmware/status')
         data = self.request(url)
+        # Check if 'last_check' exists and is not empty, otherwise set it to January 27, 1981
+        last_check = data.get('last_check', '1981-01-27')
+        last_update_date = parser.parse(last_check)
 
         # If last update check is older than 12 hours
-        last_update_date = parser.parse(data['last_check'])
         if datetime.now(last_update_date.tzinfo) - last_update_date > timedelta(hours=12):
             url = self.getURL('core/firmware/check')
             data = self.request(url, method='post')
