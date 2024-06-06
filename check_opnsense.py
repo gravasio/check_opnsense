@@ -44,11 +44,14 @@ except ImportError as e:
     print("Missing python module: {}".format(e.message))
     sys.exit(255)
 
-MODES = {}
-
-def checkmode(f):
-    MODES[(f.__name__.replace('check', '').lower())] = f.__name__
-    return f
+MODES = { 
+         'updates': 'checkUpdates',
+         'ipsec': 'checkIpsec',
+         'routes': 'checkRoutes',
+         'services': 'checkServices',
+         'openvpn_client': 'checkOpenVPNClient',
+         'openvpn_server': 'checkOpenVPNServer',
+         }
 
 class NagiosState(Enum):
     OK = 0
@@ -138,11 +141,10 @@ class CheckOPNsense:
 
         try:
             f = getattr(self, MODES[self.options.mode])
-            f()
         except (KeyError, AttributeError):
-            message = "Check mode '{}' not known".format(self.options.mode)
-            self.output(NagiosState.UNKNOWN, message)
-
+           message = "Check mode '{}' not known".format(self.options.mode)
+           self.output(NagiosState.UNKNOWN, message)
+        f()
         self.checkOutput()
 
     def parseOptions(self):
@@ -165,31 +167,34 @@ class CheckOPNsense:
                                 choices=MODES.keys(),
                                 required=True,
                                 help="Mode to use.")
+       
         check_opts.add_argument('-w', '--warning', dest='treshold_warning', type=float,
                                 help='Warning treshold for check value')
         check_opts.add_argument('-c', '--critical', dest='treshold_critical', type=float,
                                 help='Critical treshold for check value')
+
+        sub_options = p.add_argument_group('Specific Options')
+        sub_options.add_argument('--services', dest='services_tockeck', help='(module services): Comma separated list of services to check')
 
         options = p.parse_args()
 
         self.options = options
 
 # Checks if updates are available
-    @checkmode
     def checkUpdates(self):
         url = self.getURL('core/firmware/status')
         data = self.request(url)
 
-        # If last update check is older than one day force a refresh
-        last_check_date = parser.parse(data['last_check'])
-        if datetime.now(last_check_date.tzinfo) - last_check_date > timedelta(minutes=1): #days
-            check_ulr = self.getURL('core/firmware/check')
-            check_data = self.request(check_ulr, method='post')
-            if check_data['status'] == 'ok':
-                time.sleep(1)
+        # If last update check is older than 12 hours
+        last_update_date = parser.parse(data['last_check'])
+        if datetime.now(last_update_date.tzinfo) - last_update_date > timedelta(hours=12):
+            url = self.getURL('core/firmware/check')
+            data = self.request(url, method='post')
+            if data['status'] == 'ok':
+                time.sleep(5)
             # Reload up to date JSON
             url = self.getURL('core/firmware/status')
-            data = self.request(url)
+            data = self.request(url, method='get' )
 
         if data['status'] == 'ok' and data['status_upgrade_action'] == 'all':
             count = data['updates']
@@ -204,17 +209,79 @@ class CheckOPNsense:
             self.checkMessage = "System up to date"
 
         self.checkMessage += ' (version={}/{})'.format(data['product_id'], data['product_version'])
-
+        
         self.checkLongOutput.append(
             '* Last update check: {}'.format(data['last_check'])
         )
-
+        
         self.checkLongOutput.append(
             '* OS version: {}'.format(data['os_version'])
         )
 
+# Check Services
+    def checkServices(self):
+        url = self.getURL('core/service/search')
+        response = self.request(url)
+        if response:
+            services = response['rows']    
+            services_to_check = self.options.services_tockeck.split(',')
+            services_status = []
+            services_not_running = []
+            services_running = []
+
+            for service in services_to_check:
+                service_info = next((s for s in services if s['name'] == service), None)
+                
+                # Check if the service was found and is running
+                if service_info and service_info['running']:
+                    services_running.append(service)
+                    
+                else:
+                    services_not_running.append(service)
+                    
+            if services_not_running:
+                self.checkResult = NagiosState.CRITICAL
+                services_status.append(f"NOT running: "+','.join(services_not_running))
+                    
+            if services_running:
+                services_status.append(f"running: "+','.join(services_running))
+            
+            # Set the check message to the status of the services
+            self.checkMessage = ' - '.join(services_status)
+        else:
+            # If the API request was not successful, set the check result to UNKNOWN
+            self.checkMessage = "Failed to retrieve services status"
+            self.checkResult = NagiosState.UNKNOWN
+
+    def checkOpenVPNClient(self):
+        url = self.getURL('openvpn/service/searchsessions')
+        response = self.request(url)
+        if response:
+            clients = [row for row in response['rows'] if row['type'] == 'client']
+            disconnected_clients = [client for client in clients if client['status'] != 'connected']
+
+            if disconnected_clients:
+                self.checkResult = NagiosState.CRITICAL
+                self.checkMessage = f"Disconnected OpenVPN clients: {len(disconnected_clients)}"
+            else:
+                self.checkMessage = "All OpenVPN clients are connected"
+        else:
+            self.checkMessage = "Failed to retrieve OpenVPN client status"
+            self.checkResult = NagiosState.UNKNOWN
+
+    def checkOpenVPNServer(self):
+        url = self.getURL('openvpn/service/searchsessions')
+        response = self.request(url)
+        if response:
+            servers = [row for row in response['rows'] if row['type'] == 'server']
+            connected_clients = sum(len(server.get('client_list', [])) for server in servers)
+
+            self.checkMessage = f"Number of connected OpenVPN clients: {connected_clients}"
+        else:
+            self.checkMessage = "Failed to retrieve OpenVPN server status"
+            self.checkResult = NagiosState.UNKNOWN
+        
 # Checks gateway status
-    @checkmode
     def checkRoutes(self):
         url = self.getURL('routes/gateway/status')
         data = self.request(url)
@@ -237,7 +304,6 @@ class CheckOPNsense:
                 self.checkResult = NagiosState.OK
 
 # Checks ipses service status
-    @checkmode
     def checkIpsec(self):
         url = self.getURL('ipsec/service/status')
         data = self.request(url)
