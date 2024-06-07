@@ -174,9 +174,13 @@ class CheckOPNsense:
                                 help='Critical treshold for check value')
 
         sub_options = p.add_argument_group('Specific Options')
-        sub_options.add_argument('--services', dest='services_tockeck', help='(module services): Comma separated list of services to check')
-
+        
+        sub_options.add_argument('--services', dest='services_tocheck', help='(module services): Comma separated list of services to check')
         options = p.parse_args()
+        
+        if (options.mode == "services") and (options.services_tocheck is None):
+           p.error("Service module requires --services parameters")
+           
 
         self.options = options
 
@@ -226,7 +230,7 @@ class CheckOPNsense:
         response = self.request(url)
         if response:
             services = response['rows']    
-            services_to_check = self.options.services_tockeck.split(',')
+            services_to_check = self.options.services_tocheck.split(',')
             services_status = []
             services_not_running = []
             services_running = []
